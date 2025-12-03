@@ -16,7 +16,8 @@ import {
   ffmpegOnProgress,
   fileExists,
   getEnv,
-  hashObject
+  hashObject,
+  readJsonFile
 } from './utils'
 
 type TTSEngine = 'openai' | 'unrealspeech'
@@ -35,11 +36,10 @@ async function main() {
   const audioOutDir = path.join(outDir, isPreview ? 'audio-previews' : 'audio')
   await fs.mkdir(audioOutDir, { recursive: true })
 
-  const content = (
-    JSON.parse(
-      await fs.readFile(path.join(outDir, 'content.json'), 'utf8')
-    ) as ContentChunk[]
+  const rawContent = await readJsonFile<ContentChunk[]>(
+    path.join(outDir, 'content.json')
   )
+  const content = rawContent
     .filter((c) => !isPreview || c.page === 1)
     .concat(
       isPreview
@@ -53,11 +53,11 @@ async function main() {
           ]
         : []
     )
-
-  const metadata = JSON.parse(
-    await fs.readFile(path.join(outDir, 'metadata.json'), 'utf8')
-  ) as BookMetadata
   assert(content.length, 'no book content found')
+
+  const metadata = await readJsonFile<BookMetadata>(
+    path.join(outDir, 'metadata.json')
+  )
   assert(metadata.meta, 'invalid book metadata: missing meta')
   assert(metadata.toc?.length, 'invalid book metadata: missing toc')
 
@@ -144,7 +144,7 @@ By ${authors.join(', ')}`
       .replaceAll('\n', '\n\n')
 
     // Split the text in this chapter into paragraphs.
-    const t = `${tocItem.title}
+    const t = `${tocItem.label}
 
 ${text}`.split('\n\n')
 
@@ -175,7 +175,7 @@ ${text}`.split('\n\n')
 
     for (const [k, element] of t.entries()) {
       batches.push({
-        title: k === 0 ? tocItem.title : undefined,
+        title: k === 0 ? tocItem.label : undefined,
         text: element!
       })
     }

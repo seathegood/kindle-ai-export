@@ -1,3 +1,32 @@
+export interface BookMetadata {
+  meta: AmazonBookMeta
+  info: AmazonBookInfo
+  nav: Nav
+  toc: TocItem[]
+  pages: PageChunk[]
+  locationMap: AmazonRenderLocationMap
+}
+
+export interface Nav {
+  startPosition: number // inclusive
+  endPosition: number // inclusive?
+
+  startContentPosition: number // inclusive
+  startContentPage: number // inclusive
+
+  endContentPosition: number // exclusive
+  endContentPage: number // exclusive?
+
+  totalNumPages: number
+  totalNumContentPages: number
+}
+
+export interface PageChunk {
+  index: number
+  page: number
+  screenshot: string
+}
+
 export interface ContentChunk {
   index: number
   page: number
@@ -5,21 +34,31 @@ export interface ContentChunk {
   screenshot: string
 }
 
-export interface TocItem {
-  title: string
+export interface PageNav {
   page?: number
   location?: number
   total: number
 }
 
-export interface PageChunk {
-  index: number
-  page: number
-  total: number
-  screenshot: string
-}
+export type TocItem = {
+  label: string
+  positionId: number
+  page?: number
+  location?: number
+  depth: number
+} & (
+  | {
+      page: number
+      location?: never
+    }
+  | {
+      page?: never
+      location: number
+    }
+)
 
-export interface BookMeta {
+/** Amazon's YT Metadata */
+export interface AmazonBookMeta {
   ACR: string
   asin: string
   authorList: Array<string>
@@ -37,12 +76,14 @@ export interface BookMeta {
   releaseDate: string
   sample: boolean
   title: string
+  /** A hash unique to the book's version */
   version: string
   startPosition: number
   endPosition: number
 }
 
-export interface BookInfo {
+/** Amazon's Karamel Book Metadata */
+export interface AmazonBookInfo {
   clippingLimit: number
   contentChecksum: any
   contentType: string
@@ -69,9 +110,19 @@ export interface BookInfo {
   srl: number
 }
 
-export interface BookMetadata {
-  info: BookInfo
-  meta: BookMeta
-  toc: TocItem[]
-  pages: PageChunk[]
+export interface AmazonRenderLocationMap {
+  locations: number[]
+  navigationUnit: Array<{
+    startPosition: number
+    page: number // derived
+    label: string
+  }>
+}
+
+export type AmazonRenderToc = Array<AmazonRenderTocItem>
+
+export type AmazonRenderTocItem = {
+  label: string
+  tocPositionId: number
+  entries?: AmazonRenderTocItem[]
 }
