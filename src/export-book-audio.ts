@@ -1,9 +1,9 @@
 import 'dotenv/config'
 
+import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-import ffmpeg from 'fluent-ffmpeg'
 import ky from 'ky'
 import ID3 from 'node-id3'
 import { OpenAIClient, type SpeechParams } from 'openai-fetch'
@@ -13,7 +13,6 @@ import { UnrealSpeechClient } from 'unrealspeech-api'
 import type { BookMetadata, ContentChunk } from './types'
 import {
   assert,
-  ffmpegOnProgress,
   fileExists,
   getEnv,
   hashObject,
@@ -269,43 +268,11 @@ ${text}`.split('\n\n')
     `\nUsing ffmpeg to concat audiobook from ${audioParts.length} files...`
   )
 
-  // Use ffmpeg to concatenate the audio files into a single audiobook file.
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg(audioConcatInputFilePath)
-      .inputOptions(['-f', 'concat'])
-      .withOptions([
-        // metadata (mp3 tags)
-        '-metadata',
-        `title="${isPreview ? 'Preview of ' : ''}${title}"`
-        // TODO: fluent-ffmpeg is choking on this metadata tag for some reason
-        // '-metadata',
-        // `artist="${authors.join('/')}"`,
-        // '-metadata',
-        // `encoded_by="https://github.com/transitive-bullshit/kindle-ai-export"`
-      ])
-      .outputOptions([
-        // misc
-        '-hide_banner',
-        '-map_metadata',
-        '-1',
-        '-map_chapters',
-        '-1',
-
-        // audio
-        '-c',
-        'copy'
-      ])
-      .output(audiobookOutputFilePath)
-      .on('start', (cmd) => console.log({ cmd }))
-      .on(
-        'progress',
-        ffmpegOnProgress((progress) => {
-          console.log(`Processing audio: ${Math.floor(progress * 100)}%`)
-        }, expectedDurationMs)
-      )
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .run()
+  await runFfmpegConcat({
+    inputFilePath: audioConcatInputFilePath,
+    outputFilePath: audiobookOutputFilePath,
+    title: isPreview ? `Preview of ${title}` : title,
+    expectedDurationMs
   })
 
   try {
@@ -384,13 +351,140 @@ ${text}`.split('\n\n')
   console.log(`\nGenerated audiobook: ${audiobookOutputFilePath}`)
 }
 
-async function ffmpegProbe(filePath: string) {
-  return new Promise<ffmpeg.FfprobeData>((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) return reject(err)
-      resolve(data)
+type FfprobeData = {
+  format: {
+    duration?: number
+  }
+  streams: Array<{
+    duration?: number | string
+  }>
+}
+
+async function ffmpegProbe(filePath: string): Promise<FfprobeData> {
+  const { stdout } = await execCommand('ffprobe', [
+    '-v',
+    'error',
+    '-show_format',
+    '-show_streams',
+    '-print_format',
+    'json',
+    filePath
+  ])
+
+  return JSON.parse(stdout) as FfprobeData
+}
+
+async function runFfmpegConcat({
+  inputFilePath,
+  outputFilePath,
+  title,
+  expectedDurationMs
+}: {
+  inputFilePath: string
+  outputFilePath: string
+  title: string
+  expectedDurationMs: number
+}) {
+  await execCommand(
+    'ffmpeg',
+    [
+      '-hide_banner',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      inputFilePath,
+      '-metadata',
+      `title=${title}`,
+      '-map_metadata',
+      '-1',
+      '-map_chapters',
+      '-1',
+      '-c',
+      'copy',
+      outputFilePath
+    ],
+    {
+      onStderrLine(line) {
+        const seconds = parseFfmpegTimemarkToSeconds(line)
+        if (seconds === undefined || expectedDurationMs <= 0) return
+        const progress = Math.max(
+          0,
+          Math.min(1, (seconds * 1000) / expectedDurationMs)
+        )
+        console.log(`Processing audio: ${Math.floor(progress * 100)}%`)
+      }
+    }
+  )
+}
+
+async function execCommand(
+  command: string,
+  args: string[],
+  opts?: {
+    onStderrLine?: (line: string) => void
+  }
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    let stderrBuffer = ''
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += String(chunk)
+    })
+
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      const text = String(chunk)
+      stderr += text
+      stderrBuffer += text
+      let nl = stderrBuffer.indexOf('\n')
+      while (nl !== -1) {
+        const line = stderrBuffer.slice(0, nl).trim()
+        if (line && opts?.onStderrLine) opts.onStderrLine(line)
+        stderrBuffer = stderrBuffer.slice(nl + 1)
+        nl = stderrBuffer.indexOf('\n')
+      }
+    })
+
+    child.on('error', (error) => reject(error))
+    child.on('close', (code) => {
+      if (stderrBuffer.trim() && opts?.onStderrLine) {
+        opts.onStderrLine(stderrBuffer.trim())
+      }
+      if (code !== 0) {
+        reject(
+          new Error(
+            `${command} exited with code ${code ?? 'null'}\n${stderr || stdout}`
+          )
+        )
+        return
+      }
+      resolve({ stdout, stderr })
     })
   })
+}
+
+function parseFfmpegTimemarkToSeconds(line: string): number | undefined {
+  const token = 'time='
+  const start = line.indexOf(token)
+  if (start === -1) return undefined
+
+  const rest = line.slice(start + token.length).trim()
+  const firstSpace = rest.indexOf(' ')
+  const raw = firstSpace === -1 ? rest : rest.slice(0, firstSpace)
+  if (!raw) return undefined
+
+  const parts = raw.split(':')
+  if (parts.length !== 3) return undefined
+
+  const hours = Number(parts[0])
+  const minutes = Number(parts[1])
+  const seconds = Number(parts[2])
+  if ([hours, minutes, seconds].some((n) => Number.isNaN(n))) return undefined
+  return hours * 3600 + minutes * 60 + seconds
 }
 
 await main()
