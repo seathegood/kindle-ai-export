@@ -1,6 +1,7 @@
 import 'dotenv/config'
 
 import fs from 'node:fs/promises'
+import path from 'node:path'
 
 import { input } from '@inquirer/prompts'
 import { chromium } from 'playwright-core'
@@ -90,7 +91,9 @@ async function main() {
   console.log(footerText)
 
   const b = await page.screenshot({ type: 'png' })
-  await fs.writeFile('out/B0819W19WD-page-61.png', b)
+  const tmpOutDir = path.join('_tmp', 'browserbase-experiment')
+  await fs.mkdir(tmpOutDir, { recursive: true })
+  await fs.writeFile(path.join(tmpOutDir, 'B0819W19WD-page-61.png'), b)
 
   await page.close()
   await browser.close()

@@ -7,13 +7,18 @@ import path from 'node:path'
 import PDFDocument from 'pdfkit'
 
 import type { BookMetadata, ContentChunk } from './types'
-import { assert, getEnv } from './utils'
+import { assert, getEnv, resolveBookOutputDir } from './utils'
 
 async function main() {
   const asin = getEnv('ASIN')
   assert(asin, 'ASIN is required')
 
-  const outDir = path.join('out', asin)
+  const { outDir, usingLegacyDir } = await resolveBookOutputDir(asin)
+  if (usingLegacyDir) {
+    console.warn(
+      `Using legacy reports directory: "${outDir}". Set REPORTS_DIR or migrate to "_reports/".`
+    )
+  }
 
   const content = JSON.parse(
     await fsp.readFile(path.join(outDir, 'content.json'), 'utf8')

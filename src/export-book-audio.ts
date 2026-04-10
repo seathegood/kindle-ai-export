@@ -16,7 +16,8 @@ import {
   ffmpegOnProgress,
   fileExists,
   getEnv,
-  hashObject
+  hashObject,
+  resolveBookOutputDir
 } from './utils'
 
 type TTSEngine = 'openai' | 'unrealspeech'
@@ -31,7 +32,12 @@ async function main() {
   // In preview mode, we only export the first page of the book.
   const isPreview = getEnv('AUDIOBOOK_PREVIEW') === 'true'
 
-  const outDir = path.join('out', asin)
+  const { outDir, usingLegacyDir } = await resolveBookOutputDir(asin)
+  if (usingLegacyDir) {
+    console.warn(
+      `Using legacy reports directory: "${outDir}". Set REPORTS_DIR or migrate to "_reports/".`
+    )
+  }
   const audioOutDir = path.join(outDir, isPreview ? 'audio-previews' : 'audio')
   await fs.mkdir(audioOutDir, { recursive: true })
 

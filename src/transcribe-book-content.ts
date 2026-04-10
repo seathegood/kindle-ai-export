@@ -8,7 +8,7 @@ import { OpenAIClient } from 'openai-fetch'
 import pMap from 'p-map'
 
 import type { ContentChunk } from './types'
-import { assert, getEnv } from './utils'
+import { assert, getEnv, resolveBookOutputDir } from './utils'
 
 const INDEX_PAGE_RE = /(\d+)-(\d+)\.png$/
 const PAGE_NUMBER_LINE_RE = /^\s*\d+\s*$/
@@ -69,7 +69,12 @@ async function main() {
   const asin = getEnv('ASIN')
   assert(asin, 'ASIN is required')
 
-  const outDir = path.join('out', asin)
+  const { outDir, usingLegacyDir } = await resolveBookOutputDir(asin)
+  if (usingLegacyDir) {
+    console.warn(
+      `Using legacy reports directory: "${outDir}". Set REPORTS_DIR or migrate to "_reports/".`
+    )
+  }
   const pageScreenshotsDir = path.join(outDir, 'pages')
   const pageScreenshots = sortScreenshots(
     await globby(`${pageScreenshotsDir}/*.png`)

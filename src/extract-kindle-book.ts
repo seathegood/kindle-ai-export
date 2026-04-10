@@ -20,7 +20,8 @@ import {
   deromanize,
   getEnv,
   normalizeAuthors,
-  parseJsonpResponse
+  parseJsonpResponse,
+  resolveBookOutputDir
 } from './utils'
 
 const TIME = {
@@ -216,7 +217,12 @@ async function main() {
     : any
   let pageRef: Page | undefined
   try {
-    const outDir = path.join('out', asin)
+    const { outDir, usingLegacyDir } = await resolveBookOutputDir(asin)
+    if (usingLegacyDir) {
+      console.warn(
+        `Using legacy reports directory: "${outDir}". Set REPORTS_DIR or migrate to "_reports/".`
+      )
+    }
     const userDataDir = path.join(outDir, 'data')
     const pageScreenshotsDir = path.join(outDir, 'pages')
     await fs.mkdir(userDataDir, { recursive: true })
