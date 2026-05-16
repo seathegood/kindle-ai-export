@@ -1,8 +1,11 @@
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 
 import hashObjectImpl from 'hash-object'
 import { getEnv } from 'kindle-api-ky'
+import * as tar from 'tar'
 
 export {
   assert,
@@ -69,4 +72,42 @@ export function hashObject(obj: Record<string, any>): string {
     algorithm: 'sha1',
     encoding: 'hex'
   })
+}
+
+export async function readJsonFile<T = unknown>(filePath: string): Promise<T> {
+  return JSON.parse(await fs.readFile(filePath, 'utf8')) as T
+}
+
+export async function tryReadJsonFile<T = unknown>(
+  filePath: string
+): Promise<T | undefined> {
+  try {
+    return await readJsonFile<T>(filePath)
+  } catch {
+    return undefined
+  }
+}
+
+export async function extractTarBuffer(
+  tarBuffer: Buffer,
+  {
+    cwd,
+    prefix = 'render-'
+  }: {
+    cwd?: string
+    prefix?: string
+  } = {}
+): Promise<string> {
+  const baseDir = cwd || path.join(os.tmpdir(), '_kindle-ai-export')
+  await fs.mkdir(baseDir, { recursive: true })
+  const outDir = await fs.mkdtemp(path.join(baseDir, prefix))
+
+  await new Promise<void>((resolve, reject) => {
+    const extractor = tar.x({ cwd: outDir })
+    extractor.on('close', resolve)
+    extractor.on('error', reject)
+    Readable.from(tarBuffer).pipe(extractor)
+  })
+
+  return outDir
 }

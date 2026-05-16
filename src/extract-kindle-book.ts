@@ -23,12 +23,19 @@ import type {
   PageChunk
 } from './types'
 import {
+  mapTargetToNearestLocationAnchor,
+  parsePageNav,
+  parseTocItems
+} from './playwright-utils'
+import {
   assert,
-  deromanize,
+  extractTarBuffer,
   getEnv,
+  hashObject,
   normalizeAuthors,
   parseJsonpResponse,
-  resolveBookOutputDir
+  resolveBookOutputDir,
+  tryReadJsonFile
 } from './utils'
 
 const TIME = {
@@ -297,18 +304,13 @@ async function main() {
           url.hostname === 'read.amazon.com' &&
           url.pathname === '/renderer/render'
         ) {
+          const params = Object.fromEntries(url.searchParams.entries())
           const startPosition = Number.parseInt(
-            url.searchParams.get('startingPosition') || '',
+            params.startingPosition || '',
             10
           )
-          const skipPageCount = Number.parseInt(
-            url.searchParams.get('skipPageCount') || '',
-            10
-          )
-          const numPage = Number.parseInt(
-            url.searchParams.get('numPage') || '',
-            10
-          )
+          const skipPageCount = Number.parseInt(params.skipPageCount || '', 10)
+          const numPage = Number.parseInt(params.numPage || '', 10)
           if (
             !Number.isNaN(startPosition) &&
             !Number.isNaN(skipPageCount) &&
@@ -321,6 +323,28 @@ async function main() {
             )
           ) {
             renderBatches.push({ startPosition, skipPageCount, numPage })
+          }
+
+          if (!locationMap) {
+            const tarBuffer = await response.body().catch(() => undefined)
+            if (tarBuffer) {
+              try {
+                const renderDir = await extractTarBuffer(tarBuffer, {
+                  cwd: path.join(userDataDir, 'render'),
+                  prefix: `${hashObject(params)}-`
+                })
+                const map = await tryReadJsonFile<AmazonRenderLocationMap>(
+                  path.join(renderDir, 'location_map.json')
+                )
+                if (
+                  map &&
+                  Array.isArray(map.locations) &&
+                  Array.isArray(map.navigationUnit)
+                ) {
+                  locationMap = map
+                }
+              } catch {}
+            }
           }
         } else if (url.pathname.endsWith('YJmetadata.jsonp')) {
           const body = await response.text()
@@ -683,6 +707,75 @@ async function main() {
           Number.isFinite(unit.startPosition) && Number.isFinite(unit.page)
       )
       .sort((a, b) => a.startPosition - b.startPosition)
+
+    const attemptTocJump = async (
+      direction: 'forward' | 'backward',
+      currentNav: PageNav,
+      target: number
+    ): Promise<PageNav | undefined> => {
+      if (!tocSamples.length) return undefined
+      const candidates = tocSamples.filter(
+        (item) => item.page !== undefined && item.locator
+      )
+      if (!candidates.length) return undefined
+
+      const filtered = candidates.filter((item) => {
+        if (item.page === undefined) return false
+        if (currentNav.page === undefined) return false
+        return direction === 'forward'
+          ? item.page > currentNav.page
+          : item.page < currentNav.page
+      })
+      if (!filtered.length) return undefined
+
+      const mappedTarget =
+        currentNav.page !== undefined && locationAnchors.length
+          ? mapTargetToNearestLocationAnchor(
+              locationAnchors,
+              currentNav.page,
+              target,
+              direction
+            )
+          : target
+
+      let bestMatch: { item: TocItem; diff: number } | undefined
+      for (const item of filtered) {
+        const diff = Math.abs((item.page ?? mappedTarget) - mappedTarget)
+        if (!bestMatch || diff < bestMatch.diff) {
+          bestMatch = { item, diff }
+        }
+      }
+      if (!bestMatch?.item.locator) return undefined
+
+      await openTableOfContents()
+      await bestMatch.item.locator.scrollIntoViewIfNeeded().catch(() => {})
+      await bestMatch.item.locator
+        .waitFor({ state: 'visible', timeout: 2000 })
+        .catch(() => {})
+      await bestMatch.item.locator.click({ timeout: 2000 }).catch(() => {})
+      await delay(400)
+
+      const closeBtn = page.locator('.side-menu-close-button')
+      if (await closeBtn.isVisible().catch(() => false)) {
+        await closeBtn.click({ timeout: 1000 }).catch(() => {})
+        await delay(180)
+      } else {
+        await page.keyboard.press('Escape').catch(() => {})
+        await delay(150)
+      }
+
+      const navAfter = await getPageNav(false).catch(
+        () => undefined as PageNav | undefined
+      )
+      if (
+        navAfter?.page !== undefined &&
+        currentNav.page !== undefined &&
+        Math.abs(navAfter.page - target) < Math.abs(currentNav.page - target)
+      ) {
+        return navAfter
+      }
+      return navAfter
+    }
     async function goToPage(pageNumber: number) {
       // Dismiss any overlays first
       await page.keyboard.press('Escape').catch(() => {})
@@ -762,93 +855,6 @@ async function main() {
           return latest
         }
 
-        const attemptTocJump = async (
-          direction: 'forward' | 'backward',
-          currentNav: PageNav,
-          target: number
-        ): Promise<PageNav | undefined> => {
-          if (!tocSamples.length) return undefined
-          const candidates = tocSamples.filter(
-            (item) => item.page !== undefined && item.locator
-          )
-          if (!candidates.length) return undefined
-
-          const filtered = candidates.filter((item) => {
-            if (item.page === undefined) return false
-            if (currentNav.page === undefined) return false
-            return direction === 'forward'
-              ? item.page > currentNav.page
-              : item.page < currentNav.page
-          })
-          if (!filtered.length) return undefined
-
-          // If renderer location anchors are available, use them to pick
-          // an intermediate jump point closer to the target location.
-          let mappedTarget = target
-          if (locationAnchors.length) {
-            const anchorCandidates = locationAnchors.filter((a) =>
-              direction === 'forward'
-                ? a.startPosition > (currentNav.page ?? 0)
-                : a.startPosition < (currentNav.page ?? Number.MAX_SAFE_INTEGER)
-            )
-            let bestAnchor:
-              | {
-                  startPosition: number
-                  page: number
-                }
-              | undefined
-            for (const anchor of anchorCandidates) {
-              const diff = Math.abs(anchor.startPosition - target)
-              const bestDiff = bestAnchor
-                ? Math.abs(bestAnchor.startPosition - target)
-                : Number.POSITIVE_INFINITY
-              if (diff < bestDiff) bestAnchor = anchor
-            }
-            if (bestAnchor) {
-              mappedTarget = bestAnchor.startPosition
-            }
-          }
-
-          let bestMatch: { item: TocItem; diff: number } | undefined
-          for (const item of filtered) {
-            const diff = Math.abs((item.page ?? mappedTarget) - mappedTarget)
-            if (!bestMatch || diff < bestMatch.diff) {
-              bestMatch = { item, diff }
-            }
-          }
-          if (!bestMatch?.item.locator) return undefined
-
-          await openTableOfContents()
-          await bestMatch.item.locator.scrollIntoViewIfNeeded().catch(() => {})
-          await bestMatch.item.locator
-            .waitFor({ state: 'visible', timeout: 2000 })
-            .catch(() => {})
-          await bestMatch.item.locator.click({ timeout: 2000 }).catch(() => {})
-          await delay(400)
-
-          const closeBtn = page.locator('.side-menu-close-button')
-          if (await closeBtn.isVisible().catch(() => false)) {
-            await closeBtn.click({ timeout: 1000 }).catch(() => {})
-            await delay(180)
-          } else {
-            await page.keyboard.press('Escape').catch(() => {})
-            await delay(150)
-          }
-
-          const navAfter = await getPageNav(false).catch(
-            () => undefined as PageNav | undefined
-          )
-          if (
-            navAfter?.page !== undefined &&
-            currentNav.page !== undefined &&
-            Math.abs(navAfter.page - target) <
-              Math.abs(currentNav.page - target)
-          ) {
-            return navAfter
-          }
-          return navAfter
-        }
-
         let currentNav: PageNav | undefined = navInitial
         let iterations = 0
         let tocAttempts = 0
@@ -903,6 +909,16 @@ async function main() {
         pageNumber = Math.min(Math.max(1, pageNumber), current.total)
         if (current.page === pageNumber) {
           return
+        }
+      }
+
+      // For large jumps, use TOC + location anchors first, then fall back.
+      if (current?.page !== undefined) {
+        const delta = pageNumber - current.page
+        if (Math.abs(delta) > 50) {
+          const direction = delta > 0 ? 'forward' : 'backward'
+          const jumped = await attemptTocJump(direction, current, pageNumber)
+          if (jumped?.page === pageNumber) return
         }
       }
 
@@ -1724,95 +1740,6 @@ async function main() {
   } finally {
     await pageRef?.close().catch(() => {})
     await context?.close().catch(() => {})
-  }
-}
-
-function parsePageNav(text: string | null): PageNav | undefined {
-  {
-    // Parse normal page locations
-    const match = text?.match(/page\s+(\d+)\s+of\s+(\d+)/i)
-    if (match) {
-      const page = Number.parseInt(match?.[1]!)
-      const total = Number.parseInt(match?.[2]!)
-      if (Number.isNaN(page) || Number.isNaN(total)) {
-        return undefined
-      }
-
-      return { page, total }
-    }
-  }
-
-  {
-    // Parse locations which are not part of the main book pages
-    // (toc, copyright, title, etc)
-    const match = text?.match(/location\s+(\d+)\s+of\s+(\d+)/i)
-    if (match) {
-      const location = Number.parseInt(match?.[1]!)
-      const total = Number.parseInt(match?.[2]!)
-      if (Number.isNaN(location) || Number.isNaN(total)) {
-        return undefined
-      }
-
-      return { location, total }
-    }
-  }
-
-  {
-    // Parse locations which use roman numerals
-    const match = text?.match(/page\s+([cdilmvx]+)\s+of\s+(\d+)/i)
-    if (match) {
-      const location = deromanize(match?.[1]!)
-      const total = Number.parseInt(match?.[2]!)
-      if (Number.isNaN(location) || Number.isNaN(total)) {
-        return undefined
-      }
-
-      return { location, total }
-    }
-  }
-}
-
-function parseTocItems(tocItems: TocItem[]) {
-  // Normalize TOC items: if only `location` is present, treat it as `page`
-  const norm = tocItems.map((item) => {
-    if (item.page === undefined && item.location !== undefined) {
-      return { ...item, page: item.location } as TocItem
-    }
-    return item
-  })
-
-  // Find the first page in the TOC which contains the main book content
-  const firstPageTocItem = norm.find((item) => item.page !== undefined)
-  assert(firstPageTocItem, 'Unable to find first valid page in TOC')
-
-  // Try to find the first page in the TOC after the main book content
-  const afterLastPageTocItem = norm.find((item) => {
-    if (item.page === undefined) return false
-    if (item === firstPageTocItem) return false
-
-    const percentage = item.page / item.total
-    if (percentage < 0.9) return false
-
-    if (/acknowledgements/i.test(item.title)) return true
-    if (/^discover more$/i.test(item.title)) return true
-    if (/^extras$/i.test(item.title)) return true
-    if (/about the author/i.test(item.title)) return true
-    if (/meet the author/i.test(item.title)) return true
-    if (/^also by /i.test(item.title)) return true
-    if (/^copyright$/i.test(item.title)) return true
-    if (/ teaser$/i.test(item.title)) return true
-    if (/ preview$/i.test(item.title)) return true
-    if (/^excerpt from/i.test(item.title)) return true
-    if (/^cast of characters$/i.test(item.title)) return true
-    if (/^timeline$/i.test(item.title)) return true
-    if (/^other titles/i.test(item.title)) return true
-
-    return false
-  })
-
-  return {
-    firstPageTocItem,
-    afterLastPageTocItem
   }
 }
 
