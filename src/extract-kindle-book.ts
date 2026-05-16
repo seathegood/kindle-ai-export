@@ -673,6 +673,16 @@ async function main() {
     // Global flag: if the footer shows only "Location", disable large "Go to Page" jumps.
     let LOCATION_MODE = false
     let tocSamples: Array<TocItem> = []
+    const locationAnchors = (locationMap?.navigationUnit || [])
+      .map((unit) => ({
+        startPosition: unit.startPosition,
+        page: unit.page
+      }))
+      .filter(
+        (unit) =>
+          Number.isFinite(unit.startPosition) && Number.isFinite(unit.page)
+      )
+      .sort((a, b) => a.startPosition - b.startPosition)
     async function goToPage(pageNumber: number) {
       // Dismiss any overlays first
       await page.keyboard.press('Escape').catch(() => {})
@@ -772,9 +782,36 @@ async function main() {
           })
           if (!filtered.length) return undefined
 
+          // If renderer location anchors are available, use them to pick
+          // an intermediate jump point closer to the target location.
+          let mappedTarget = target
+          if (locationAnchors.length) {
+            const anchorCandidates = locationAnchors.filter((a) =>
+              direction === 'forward'
+                ? a.startPosition > (currentNav.page ?? 0)
+                : a.startPosition < (currentNav.page ?? Number.MAX_SAFE_INTEGER)
+            )
+            let bestAnchor:
+              | {
+                  startPosition: number
+                  page: number
+                }
+              | undefined
+            for (const anchor of anchorCandidates) {
+              const diff = Math.abs(anchor.startPosition - target)
+              const bestDiff = bestAnchor
+                ? Math.abs(bestAnchor.startPosition - target)
+                : Number.POSITIVE_INFINITY
+              if (diff < bestDiff) bestAnchor = anchor
+            }
+            if (bestAnchor) {
+              mappedTarget = bestAnchor.startPosition
+            }
+          }
+
           let bestMatch: { item: TocItem; diff: number } | undefined
           for (const item of filtered) {
-            const diff = Math.abs((item.page ?? target) - target)
+            const diff = Math.abs((item.page ?? mappedTarget) - mappedTarget)
             if (!bestMatch || diff < bestMatch.diff) {
               bestMatch = { item, diff }
             }
