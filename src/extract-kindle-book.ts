@@ -14,7 +14,14 @@ import {
   type Response
 } from 'playwright-core'
 
-import type { BookInfo, BookMeta, BookMetadata, PageChunk } from './types'
+import type {
+  AmazonRenderBatchHint,
+  AmazonRenderLocationMap,
+  BookInfo,
+  BookMeta,
+  BookMetadata,
+  PageChunk
+} from './types'
 import {
   assert,
   deromanize,
@@ -235,7 +242,10 @@ async function main() {
       channel: 'chrome',
       executablePath:
         '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      args: ['--hide-crash-restore-bubble'],
+      args: [
+        '--hide-crash-restore-bubble',
+        '--disable-features=MacAppCodeSignClone'
+      ],
       ignoreDefaultArgs: ['--enable-automation'],
       deviceScaleFactor: 2,
       viewport: { width: 1400, height: 1800 }
@@ -253,6 +263,8 @@ async function main() {
 
     let info: BookInfo | undefined
     let meta: BookMeta | undefined
+    let locationMap: AmazonRenderLocationMap | undefined
+    const renderBatches: AmazonRenderBatchHint[] = []
 
     page.on('response', async (response: Response) => {
       try {
@@ -270,6 +282,46 @@ async function main() {
           delete body.metadataUrl
           delete body.YJFormatVersion
           info = body
+
+          // Some Kindle renderer builds expose location mapping metadata here.
+          const mapCandidate =
+            body.locationMap || body.location_map || body.pageLocationMap
+          if (
+            mapCandidate &&
+            Array.isArray(mapCandidate.locations) &&
+            Array.isArray(mapCandidate.navigationUnit)
+          ) {
+            locationMap = mapCandidate as AmazonRenderLocationMap
+          }
+        } else if (
+          url.hostname === 'read.amazon.com' &&
+          url.pathname === '/renderer/render'
+        ) {
+          const startPosition = Number.parseInt(
+            url.searchParams.get('startingPosition') || '',
+            10
+          )
+          const skipPageCount = Number.parseInt(
+            url.searchParams.get('skipPageCount') || '',
+            10
+          )
+          const numPage = Number.parseInt(
+            url.searchParams.get('numPage') || '',
+            10
+          )
+          if (
+            !Number.isNaN(startPosition) &&
+            !Number.isNaN(skipPageCount) &&
+            !Number.isNaN(numPage) &&
+            !renderBatches.some(
+              (b) =>
+                b.startPosition === startPosition &&
+                b.skipPageCount === skipPageCount &&
+                b.numPage === numPage
+            )
+          ) {
+            renderBatches.push({ startPosition, skipPageCount, numPage })
+          }
         } else if (url.pathname.endsWith('YJmetadata.jsonp')) {
           const body = await response.text()
           const metadata = parseJsonpResponse<any>(body)
@@ -1608,6 +1660,8 @@ async function main() {
     }
 
     const result: BookMetadata = { info: info!, meta: meta!, toc, pages }
+    if (locationMap) result.locationMap = locationMap
+    if (renderBatches.length) result.renderBatches = renderBatches
     await fs.writeFile(
       path.join(outDir, 'metadata.json'),
       JSON.stringify(result, null, 2)

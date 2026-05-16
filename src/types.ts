@@ -74,4 +74,21 @@ export interface BookMetadata {
   meta: BookMeta
   toc: TocItem[]
   pages: PageChunk[]
+  locationMap?: AmazonRenderLocationMap
+  renderBatches?: AmazonRenderBatchHint[]
+}
+
+export interface AmazonRenderLocationMap {
+  locations: number[]
+  navigationUnit: Array<{
+    startPosition: number
+    page: number
+    label: string
+  }>
+}
+
+export interface AmazonRenderBatchHint {
+  startPosition: number
+  skipPageCount: number
+  numPage: number
 }
